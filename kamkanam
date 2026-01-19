@@ -49,6 +49,19 @@ def run_git(args, cwd):
     return result.stdout
 
 
+def parse_bool(value):
+    return str(value).lower() in ("1", "true", "yes", "on")
+
+
+def debug_enabled():
+    return parse_bool(os.getenv("KAMKANAM_DEBUG", "0"))
+
+
+def debug_log(message):
+    if debug_enabled():
+        print(f"kamkanam: {message}", file=sys.stderr)
+
+
 def repo_root():
     try:
         root = run_git(["rev-parse", "--show-toplevel"], cwd=os.getcwd()).strip()
@@ -159,7 +172,7 @@ def shorten_subject(subject, max_len=72):
 
 
 def build_prompt(diff_text, stat_text, name_status):
-    max_chars = int(os.getenv("CASK_MAX_DIFF_CHARS", "12000"))
+    max_chars = int(os.getenv("KAMKANAM_MAX_DIFF_CHARS", "12000"))
     diff_excerpt = diff_text[:max_chars]
     if len(diff_text) > max_chars:
         diff_excerpt += "\n...[diff truncated]"
@@ -196,10 +209,10 @@ def build_prompt(diff_text, stat_text, name_status):
 
 
 def call_gemini(prompt):
-    api_key = os.getenv("CASK_GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY")
+    api_key = os.getenv("KAMKANAM_GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY")
     if not api_key:
         raise RuntimeError("missing Gemini API key")
-    model = os.getenv("CASK_GEMINI_MODEL", "gemini-1.5-pro")
+    model = os.getenv("KAMKANAM_GEMINI_MODEL", "gemini-1.5-pro")
     url = (
         "https://generativelanguage.googleapis.com/v1beta/models/"
         f"{model}:generateContent?key={api_key}"
@@ -271,28 +284,28 @@ def generate_commit_message(cwd, ai_percent, require_gemini):
     diff_text = get_staged_diff(cwd)
     name_status = get_name_status(cwd)
     if not diff_text.strip():
+        debug_log("no staged diff; using fallback message")
         return fallback_message(name_status)
     stat_text = get_stat(cwd)
     prompt = build_prompt(diff_text, stat_text, name_status)
     try:
+        debug_log("requesting Gemini commit message")
         message = call_gemini(prompt)
         message = normalize_message(message)
     except (RuntimeError, urllib.error.URLError) as exc:
         if require_gemini:
             raise RuntimeError(f"Gemini failed: {exc}") from exc
-        print(f"cask: Gemini failed, using fallback: {exc}", file=sys.stderr)
+        print(f"kamkanam: Gemini failed, using fallback: {exc}", file=sys.stderr)
         message = fallback_message(name_status)
+    if message:
+        debug_log("commit message generated")
     if not message:
         message = fallback_message(name_status)
     return message
 
 
-def parse_bool(value):
-    return str(value).lower() in ("1", "true", "yes", "on")
-
-
 def parse_args(argv):
-    parser = argparse.ArgumentParser(prog="cask")
+    parser = argparse.ArgumentParser(prog="kamkanam")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     generate = subparsers.add_parser("generate", help="print a commit message to stdout")
@@ -310,7 +323,7 @@ def main(argv):
     cwd = repo_root()
     diff_text = get_staged_diff(cwd)
     ai_percent_override = args.ai_percent
-    env_override = os.getenv("CASK_AI_PERCENT")
+    env_override = os.getenv("KAMKANAM_AI_PERCENT")
     if ai_percent_override is None and env_override:
         try:
             ai_percent_override = int(env_override)
@@ -321,12 +334,16 @@ def main(argv):
     else:
         ai_percent = compute_ai_percent(diff_text)
 
-    threshold = int(os.getenv("CASK_CRUCIAL_THRESHOLD", "50"))
-    require_gemini = parse_bool(os.getenv("CASK_REQUIRE_GEMINI", "0"))
+    threshold = int(os.getenv("KAMKANAM_CRUCIAL_THRESHOLD", "50"))
+    require_gemini = parse_bool(os.getenv("KAMKANAM_REQUIRE_GEMINI", "0"))
+    debug_log(f"ai percent: {ai_percent}% (threshold {threshold}%)")
 
     if args.command == "generate":
         base_message = generate_commit_message(cwd, ai_percent, require_gemini)
         final_message = build_final_message(base_message, ai_percent, threshold)
+        if debug_enabled():
+            debug_log("final commit message:")
+            print(final_message, file=sys.stderr)
         print(final_message, end="")
         return 0
 
@@ -336,17 +353,20 @@ def main(argv):
             with open(message_path, "r", encoding="utf-8") as handle:
                 existing = handle.read()
         except OSError as exc:
-            print(f"cask: failed to read commit message: {exc}", file=sys.stderr)
+            print(f"kamkanam: failed to read commit message: {exc}", file=sys.stderr)
             return 1
         base_message = strip_comments(existing)
         if not base_message:
             base_message = generate_commit_message(cwd, ai_percent, require_gemini)
         final_message = build_final_message(base_message, ai_percent, threshold)
+        if debug_enabled():
+            debug_log("final commit message written to hook:")
+            print(final_message, file=sys.stderr)
         try:
             with open(message_path, "w", encoding="utf-8") as handle:
                 handle.write(final_message)
         except OSError as exc:
-            print(f"cask: failed to write commit message: {exc}", file=sys.stderr)
+            print(f"kamkanam: failed to write commit message: {exc}", file=sys.stderr)
             return 1
         return 0
 

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if ! command -v cask >/dev/null 2>&1; then
-  echo "cask: command not found in PATH" >&2
+if ! command -v kamkanam >/dev/null 2>&1; then
+  echo "kamkanam: command not found in PATH" >&2
   exit 1
 fi
 
-cask hook "$1"
+kamkanam hook "$1"
