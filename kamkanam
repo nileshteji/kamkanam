@@ -202,7 +202,7 @@ def shorten_subject(subject, max_len=72):
     return subject[: max_len - 3].rstrip() + "..."
 
 
-def build_prompt(diff_text, stat_text, name_status):
+def build_prompt(diff_text, stat_text, name_status, ai_percent):
     max_chars = int(os.getenv("KAMKANAM_MAX_DIFF_CHARS", "12000"))
     diff_excerpt = diff_text[:max_chars]
     if len(diff_text) > max_chars:
@@ -228,6 +228,8 @@ def build_prompt(diff_text, stat_text, name_status):
 
         Diff stat:
         {stat_text.strip() or "(empty)"}
+
+        AI usage heuristic (added lines flagged): {ai_percent}%
 
         Changed files:
         {files_block}
@@ -340,7 +342,7 @@ def generate_commit_message(cwd, ai_percent, require_gemini):
         debug_log("no staged diff; using fallback message")
         return fallback_message(name_status)
     stat_text = get_stat(cwd)
-    prompt = build_prompt(diff_text, stat_text, name_status)
+    prompt = build_prompt(diff_text, stat_text, name_status, ai_percent)
     try:
         debug_log("requesting Gemini commit message")
         message = call_gemini(prompt)
