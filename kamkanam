@@ -141,6 +141,16 @@ def compile_patterns(patterns):
 
 AI_STYLE_REGEX = compile_patterns(AI_STYLE_PATTERNS)
 AI_DISCLAIMER_REGEX = compile_patterns(AI_DISCLAIMER_PATTERNS)
+ALLOWED_TYPES = {"chore", "feature", "refactor", "bug", "hotfix"}
+TYPE_ALIASES = {
+    "fix": "bug",
+    "bugfix": "bug",
+    "feat": "feature",
+    "feature": "feature",
+    "refactor": "refactor",
+    "hotfix": "hotfix",
+    "chore": "chore",
+}
 
 def is_comment_line(line):
     stripped = line.lstrip()
@@ -228,7 +238,7 @@ def shorten_subject(subject, max_len=72):
     return subject[: max_len - 3].rstrip() + "..."
 
 
-def build_prompt(diff_text, stat_text, name_status, ai_percent):
+def build_prompt(diff_text, stat_text, name_status, ai_percent, existing_message, ai_percent_override):
     max_chars = int(os.getenv("KAMKANAM_MAX_DIFF_CHARS", "12000"))
     diff_excerpt = diff_text[:max_chars]
     if len(diff_text) > max_chars:
@@ -242,19 +252,39 @@ def build_prompt(diff_text, stat_text, name_status, ai_percent):
         else:
             files_list.append(f"{code} {path}")
     files_block = "\n".join(files_list) if files_list else "(none)"
+    existing_message = existing_message or ""
+    existing_block = existing_message.strip() if existing_message.strip() else "(none)"
+    if ai_percent_override is not None:
+        ai_hint = f"AI usage override: {ai_percent_override}% (use this exact value)."
+    else:
+        ai_hint = (
+            "Estimate AI usage from code patterns only (ignore @generated annotations "
+            f"and file paths). Heuristic reference: {ai_percent}%."
+        )
     prompt = textwrap.dedent(
         f"""\
-        You generate precise git commit messages from staged diffs.
+        Given the git diff and commit message, analyze exactly what changed, classify
+        the commit type (chore/feature/refactor/bug/hotfix), verify whether the commit
+        message accurately reflects the code changes (rewrite if needed), detect
+        AI-generated code patterns (boilerplate symmetry, unnatural consistency,
+        verbose comments, prompt-like naming, over-generalization), estimate AI usage
+        as a percentage (0-100), and output exactly one line in this format:
+        <type> : <commit message> : ai-usage <percentage>
 
         Requirements:
-        - Output only the commit subject (no markdown fences, no quotes).
-        - Use an imperative, <=72 character subject line.
-        - Do not include any AI metadata, review prefixes, or percentages.
+        - Output exactly one line, no markdown fences, no quotes.
+        - Commit message must be imperative and <=72 characters.
+        - Percentage must be an integer 0-100 with no percent sign.
+        - Do not include the type label inside the commit message.
+        - Do not include extra commentary.
+
+        Existing commit message:
+        {existing_block}
 
         Diff stat:
         {stat_text.strip() or "(empty)"}
 
-        AI usage heuristic (code-only, ignores @generated annotations): {ai_percent}%
+        {ai_hint}
 
         Changed files:
         {files_block}
@@ -328,25 +358,87 @@ def normalize_message(text):
     return text
 
 
-def build_final_message(base_message, ai_percent, threshold):
-    subject = ""
-    for line in base_message.splitlines():
-        line = line.strip()
-        if line:
-            subject = line
-            break
-    if not subject:
-        subject = "chore: update changes"
-    review_prefix = ""
-    if ai_percent > threshold:
-        if not subject.lower().startswith("review:") and not subject.lower().startswith("review "):
-            review_prefix = "REVIEW: "
-    suffix = f" : {ai_percent}%"
-    max_subject_len = 72 - len(review_prefix) - len(suffix)
-    if max_subject_len < 16:
-        max_subject_len = 72
-    subject = shorten_subject(subject, max_len=max_subject_len)
-    message = f"{review_prefix}{subject}{suffix}"
+def first_non_empty_line(text):
+    for line in text.splitlines():
+        if line.strip():
+            return line.strip()
+    return ""
+
+
+def clamp_percent(value):
+    try:
+        percent = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, min(100, percent))
+
+
+def parse_analysis_line(text):
+    text = normalize_message(text)
+    line = first_non_empty_line(text)
+    if not line:
+        return None
+    parts = line.split(" : ", 2)
+    if len(parts) != 3:
+        return None
+    commit_type = parts[0].strip().lower()
+    if commit_type in TYPE_ALIASES:
+        commit_type = TYPE_ALIASES[commit_type]
+    commit_message = parts[1].strip()
+    ai_part = parts[2].strip()
+    match = re.search(r"ai[-_ ]?usage\s+(\d{1,3})%?", ai_part, re.IGNORECASE)
+    if not match:
+        return None
+    ai_percent = clamp_percent(match.group(1))
+    if commit_type not in ALLOWED_TYPES:
+        commit_type = "chore"
+    return commit_type, commit_message, ai_percent
+
+
+def extract_existing_subject(existing_message):
+    existing_message = normalize_message(existing_message or "")
+    line = first_non_empty_line(existing_message)
+    if not line:
+        return ""
+    parsed = parse_analysis_line(line)
+    if parsed:
+        return parsed[1]
+    return line
+
+
+def strip_type_prefix(commit_message, commit_type):
+    if not commit_message:
+        return commit_message
+    lowered = commit_message.lower()
+    prefixes = [f"{commit_type}:", f"{commit_type} "]
+    for prefix in prefixes:
+        if lowered.startswith(prefix):
+            return commit_message[len(prefix):].strip()
+    return commit_message
+
+
+def build_final_message(base_message, ai_percent, threshold, fallback_subject, force_ai_percent=None):
+    parsed = parse_analysis_line(base_message)
+    if parsed:
+        commit_type, commit_message, parsed_percent = parsed
+        ai_percent = parsed_percent
+    else:
+        commit_type = "chore"
+        commit_message = fallback_subject or "update changes"
+    if force_ai_percent is not None:
+        ai_percent = force_ai_percent
+    ai_percent = clamp_percent(ai_percent)
+    commit_message = commit_message.strip()
+    if not commit_message:
+        commit_message = "update changes"
+    commit_message = strip_type_prefix(commit_message, commit_type)
+    if ai_percent > threshold and not commit_message.lower().startswith("review:"):
+        commit_message = f"REVIEW: {commit_message}"
+    max_message_len = int(os.getenv("KAMKANAM_MAX_MESSAGE_LEN", "72"))
+    commit_message = shorten_subject(commit_message, max_len=max_message_len)
+    if commit_type not in ALLOWED_TYPES:
+        commit_type = "chore"
+    message = f"{commit_type} : {commit_message} : ai-usage {ai_percent}"
     return message.strip() + "\n"
 
 
@@ -359,27 +451,37 @@ def strip_comments(commit_text):
     return "\n".join(lines).strip()
 
 
-def generate_commit_message(cwd, ai_percent, require_gemini):
+def generate_commit_message(cwd, ai_percent, ai_percent_override, require_gemini, existing_message):
     diff_text = get_staged_diff(cwd)
     name_status = get_name_status(cwd)
     if not diff_text.strip():
         debug_log("no staged diff; using fallback message")
-        return fallback_message(name_status)
+        fallback = extract_existing_subject(existing_message)
+        return fallback if fallback else fallback_message(name_status)
     stat_text = get_stat(cwd)
-    prompt = build_prompt(diff_text, stat_text, name_status, ai_percent)
+    prompt = build_prompt(
+        diff_text,
+        stat_text,
+        name_status,
+        ai_percent,
+        existing_message,
+        ai_percent_override,
+    )
     try:
-        debug_log("requesting Gemini commit message")
+        debug_log("requesting Gemini analysis")
         message = call_gemini(prompt)
         message = normalize_message(message)
     except (RuntimeError, urllib.error.URLError) as exc:
         if require_gemini:
             raise RuntimeError(f"Gemini failed: {exc}") from exc
         print(f"kamkanam: Gemini failed, using fallback: {exc}", file=sys.stderr)
-        message = fallback_message(name_status)
+        fallback = extract_existing_subject(existing_message)
+        message = fallback if fallback else fallback_message(name_status)
     if message:
-        debug_log("commit message generated")
+        debug_log("analysis line generated")
     if not message:
-        message = fallback_message(name_status)
+        fallback = extract_existing_subject(existing_message)
+        message = fallback if fallback else fallback_message(name_status)
     return message
 
 
@@ -405,6 +507,7 @@ def main(argv):
     args = parse_args(argv)
     cwd = repo_root()
     diff_text = get_staged_diff(cwd)
+    name_status = get_name_status(cwd)
     ai_percent_override = args.ai_percent
     env_override = os.getenv("KAMKANAM_AI_PERCENT")
     if ai_percent_override is None and env_override:
@@ -423,11 +526,28 @@ def main(argv):
         or "50"
     )
     require_gemini = parse_bool(os.getenv("KAMKANAM_REQUIRE_GEMINI", "0"))
-    debug_log(f"ai percent: {ai_percent}% (threshold {threshold}%)")
+    if ai_percent_override is not None:
+        debug_log(f"ai percent override: {ai_percent}% (threshold {threshold}%)")
+    else:
+        debug_log(f"ai percent heuristic: {ai_percent}% (threshold {threshold}%)")
 
     if args.command == "generate":
-        base_message = generate_commit_message(cwd, ai_percent, require_gemini)
-        final_message = build_final_message(base_message, ai_percent, threshold)
+        existing_message = ""
+        fallback_subject = fallback_message(name_status)
+        base_message = generate_commit_message(
+            cwd,
+            ai_percent,
+            ai_percent_override,
+            require_gemini,
+            existing_message,
+        )
+        final_message = build_final_message(
+            base_message,
+            ai_percent,
+            threshold,
+            fallback_subject,
+            force_ai_percent=ai_percent_override,
+        )
         if debug_enabled():
             debug_log("final commit message:")
             print(final_message, file=sys.stderr)
@@ -442,10 +562,24 @@ def main(argv):
         except OSError as exc:
             print(f"kamkanam: failed to read commit message: {exc}", file=sys.stderr)
             return 1
-        base_message = strip_comments(existing)
-        if not base_message:
-            base_message = generate_commit_message(cwd, ai_percent, require_gemini)
-        final_message = build_final_message(base_message, ai_percent, threshold)
+        existing_message = strip_comments(existing)
+        fallback_subject = extract_existing_subject(existing_message)
+        if not fallback_subject:
+            fallback_subject = fallback_message(name_status)
+        base_message = generate_commit_message(
+            cwd,
+            ai_percent,
+            ai_percent_override,
+            require_gemini,
+            existing_message,
+        )
+        final_message = build_final_message(
+            base_message,
+            ai_percent,
+            threshold,
+            fallback_subject,
+            force_ai_percent=ai_percent_override,
+        )
         if debug_enabled():
             debug_log("final commit message written to hook:")
             print(final_message, file=sys.stderr)
@@ -465,10 +599,24 @@ def main(argv):
         except OSError as exc:
             print(f"kamkanam: failed to read commit message: {exc}", file=sys.stderr)
             return 1
-        base_message = strip_comments(existing)
-        if not base_message:
-            base_message = generate_commit_message(cwd, ai_percent, require_gemini)
-        final_message = build_final_message(base_message, ai_percent, threshold)
+        existing_message = strip_comments(existing)
+        fallback_subject = extract_existing_subject(existing_message)
+        if not fallback_subject:
+            fallback_subject = fallback_message(name_status)
+        base_message = generate_commit_message(
+            cwd,
+            ai_percent,
+            ai_percent_override,
+            require_gemini,
+            existing_message,
+        )
+        final_message = build_final_message(
+            base_message,
+            ai_percent,
+            threshold,
+            fallback_subject,
+            force_ai_percent=ai_percent_override,
+        )
         if debug_enabled():
             debug_log("final commit message for editor:")
             print(final_message, file=sys.stderr)
