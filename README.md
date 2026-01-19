@@ -81,7 +81,7 @@ Make sure your install prefix is on `PATH` (for example `~/.local/bin`).
 ## Environment variables
 
 - `KAMKANAM_GEMINI_API_KEY` or `GEMINI_API_KEY` (required for Gemini)
-- `KAMKANAM_GEMINI_MODEL` (default: `gemini-1.5-pro`)
+- `KAMKANAM_GEMINI_MODEL` (default: `gemini-2.5-flash`)
 - `KAMKANAM_CRUCIAL_THRESHOLD` (default: `50`)
 - `KAMKANAM_AI_PERCENT` (override heuristic, `0-100`)
 - `KAMKANAM_MAX_DIFF_CHARS` (default: `12000`)

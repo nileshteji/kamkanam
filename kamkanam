@@ -62,6 +62,10 @@ def debug_log(message):
         print(f"kamkanam: {message}", file=sys.stderr)
 
 
+def gemini_model():
+    return os.getenv("KAMKANAM_GEMINI_MODEL", "gemini-2.5-flash")
+
+
 def tui_enabled():
     return parse_bool(os.getenv("KAMKANAM_TUI", "1"))
 
@@ -239,7 +243,8 @@ def call_gemini(prompt):
     api_key = os.getenv("KAMKANAM_GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY")
     if not api_key:
         raise RuntimeError("missing Gemini API key")
-    model = os.getenv("KAMKANAM_GEMINI_MODEL", "gemini-1.5-pro")
+    model = gemini_model()
+    debug_log(f"using Gemini model: {model}")
     url = (
         "https://generativelanguage.googleapis.com/v1beta/models/"
         f"{model}:generateContent?key={api_key}"
@@ -254,8 +259,29 @@ def call_gemini(prompt):
     }
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=30) as response:
-        result = json.load(response)
+    try:
+        with urllib.request.urlopen(req, timeout=30) as response:
+            result = json.load(response)
+    except urllib.error.HTTPError as exc:
+        body = ""
+        try:
+            body = exc.read().decode("utf-8", errors="replace").strip()
+        except OSError:
+            body = ""
+        message = f"HTTP {exc.code} {exc.reason}"
+        if body:
+            try:
+                body_json = json.loads(body)
+                api_message = body_json.get("error", {}).get("message")
+                if api_message:
+                    message += f": {api_message}"
+                else:
+                    message += f": {body}"
+            except json.JSONDecodeError:
+                message += f": {body}"
+        if exc.code == 404:
+            message += " (model not found; check KAMKANAM_GEMINI_MODEL)"
+        raise RuntimeError(f"Gemini request failed ({model}): {message}") from exc
     try:
         return result["candidates"][0]["content"]["parts"][0]["text"]
     except (KeyError, IndexError, TypeError) as exc:
