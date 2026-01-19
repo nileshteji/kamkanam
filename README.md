@@ -52,6 +52,22 @@ The git hook runs automatically on `git commit` and updates the message.
 If a message already exists, kamkanam keeps it and appends the AI percent footer.
 If you want it to generate the subject, run `git commit` without `-m`.
 
+## TUI commit flow
+
+To see the generated message inside the `git commit` session and confirm it:
+
+```sh
+git config --global core.editor "kamkanam editor"
+```
+
+Now `git commit` will show the message in the terminal and wait for Enter.
+Type `q` to abort the commit.
+
+Notes:
+
+- If you pass `-m`, the editor is skipped, so the TUI will not appear.
+- Disable the prompt for one commit with `KAMKANAM_TUI=0 git commit`.
+
 ## Setup
 
 Set your Gemini API key in your shell profile:
@@ -70,6 +86,7 @@ Make sure your install prefix is on `PATH` (for example `~/.local/bin`).
 - `KAMKANAM_AI_PERCENT` (override heuristic, `0-100`)
 - `KAMKANAM_MAX_DIFF_CHARS` (default: `12000`)
 - `KAMKANAM_REQUIRE_GEMINI` (`1` to fail if Gemini is unavailable)
+- `KAMKANAM_TUI` (`1` to prompt in `kamkanam editor`, `0` to auto-accept)
 
 ## Debugging
 

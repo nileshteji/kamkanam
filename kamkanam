@@ -62,6 +62,33 @@ def debug_log(message):
         print(f"kamkanam: {message}", file=sys.stderr)
 
 
+def tui_enabled():
+    return parse_bool(os.getenv("KAMKANAM_TUI", "1"))
+
+
+def prompt_tui(message):
+    if not tui_enabled():
+        debug_log("tui disabled; auto-accepting")
+        return True
+    try:
+        tty = open("/dev/tty", "r+")
+    except OSError:
+        debug_log("no tty available; auto-accepting")
+        return True
+    with tty:
+        tty.write("\nkamkanam commit message:\n")
+        tty.write("-" * 72 + "\n")
+        tty.write(message.rstrip() + "\n")
+        tty.write("-" * 72 + "\n")
+        tty.write("Press Enter to accept, or type 'q' to abort: ")
+        tty.flush()
+        response = tty.readline()
+    if response is None:
+        return True
+    response = response.strip().lower()
+    return response not in ("q", "quit", "n", "no")
+
+
 def repo_root():
     try:
         root = run_git(["rev-parse", "--show-toplevel"], cwd=os.getcwd()).strip()
@@ -315,6 +342,10 @@ def parse_args(argv):
     hook.add_argument("message_file", help="path to commit message file")
     hook.add_argument("--ai-percent", type=int, help="override AI percent (0-100)")
 
+    editor = subparsers.add_parser("editor", help="git core.editor entry")
+    editor.add_argument("message_file", help="path to commit message file")
+    editor.add_argument("--ai-percent", type=int, help="override AI percent (0-100)")
+
     return parser.parse_args(argv)
 
 
@@ -362,6 +393,32 @@ def main(argv):
         if debug_enabled():
             debug_log("final commit message written to hook:")
             print(final_message, file=sys.stderr)
+        try:
+            with open(message_path, "w", encoding="utf-8") as handle:
+                handle.write(final_message)
+        except OSError as exc:
+            print(f"kamkanam: failed to write commit message: {exc}", file=sys.stderr)
+            return 1
+        return 0
+
+    if args.command == "editor":
+        message_path = args.message_file
+        try:
+            with open(message_path, "r", encoding="utf-8") as handle:
+                existing = handle.read()
+        except OSError as exc:
+            print(f"kamkanam: failed to read commit message: {exc}", file=sys.stderr)
+            return 1
+        base_message = strip_comments(existing)
+        if not base_message:
+            base_message = generate_commit_message(cwd, ai_percent, require_gemini)
+        final_message = build_final_message(base_message, ai_percent, threshold)
+        if debug_enabled():
+            debug_log("final commit message for editor:")
+            print(final_message, file=sys.stderr)
+        if not prompt_tui(final_message):
+            print("kamkanam: commit aborted by user", file=sys.stderr)
+            return 1
         try:
             with open(message_path, "w", encoding="utf-8") as handle:
                 handle.write(final_message)
